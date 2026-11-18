@@ -363,3 +363,20 @@ def test_produce_saves_new_grants_before_the_render_subprocess_rechecks_them(tmp
                   "--output-dir", str(tmp_path / "out"), "--width", "320", "--height", "180"])
     [report] = (tmp_path / "out").glob("*/production_report.json")
     assert code == 0, catalogue.read(report)["blockers"]
+
+
+
+def test_publication_check_uses_the_catalogue_the_report_was_made_with(tmp_path, monkeypatch):
+    fake_youtube(monkeypatch)
+    video, source, state_dir = rendered_with_report(tmp_path, licensed=True)
+    report_path = video.parent / "rights_gate_report.json"
+    report = catalogue.read(report_path)
+    report["catalogue"] = str(state_dir / "catalogue.json")
+    catalogue.save(report_path, report)
+    assert ultra(["--no-banner", "publish", str(video)]) == 0
+    receipt = video.with_suffix(".youtube.json")
+    other = tmp_path / "other-state"
+    catalogue.save(other / "catalogue.json", catalogue.read(state_dir / "catalogue.json"))
+    assert check(receipt, other, "--studio", "no-claims", "--approve") == 2
+    assert "RIGHTS_CATALOGUE_DIFFERS_FROM_REPORT" in json.loads(receipt.read_text())["publication_check"]["reasons"]
+    assert check(receipt, state_dir, "--studio", "no-claims", "--approve") == 0

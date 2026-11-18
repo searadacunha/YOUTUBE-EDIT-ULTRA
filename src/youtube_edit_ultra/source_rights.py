@@ -14,6 +14,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from . import catalogue as cat
 from .media import UltraError
@@ -116,6 +117,28 @@ def load_claims(path: Path | None = None) -> list[dict]:
     return out
 
 
+YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+
+def _youtube_identity(url) -> tuple[bool, str | None]:
+    """(is a YouTube URL, its id). Lenient on spelling because it only names a source, never fetches."""
+    if not isinstance(url, str):
+        return False, None
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return False, None
+    host = (parsed.hostname or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in YOUTUBE_HOSTS):
+        return False, None
+    parts = [p for p in parsed.path.split("/") if p]
+    candidate = parse_qs(parsed.query).get("v", [""])[0]
+    if not candidate and parts:
+        candidate = parts[0] if host.endswith("youtu.be") else (
+            parts[1] if len(parts) > 1 and parts[0] in {"embed", "v", "shorts", "live", "e"} else "")
+    return True, candidate if VIDEO_ID.fullmatch(candidate) else None
+
+
 def _sidecar(path: Path) -> dict:
     try:
         data = json.loads(path.with_suffix(".info.json").read_text(encoding="utf-8"))
@@ -139,9 +162,10 @@ def describe(path, kind: str, *, state: dict | None = None, provenance: str | No
              if isinstance(r, dict) and digest and r.get("sha256") == digest]
     if not row or row.get("sha256") != digest:
         row = twins[0] if twins else {}
-    for twin in twins:
+    twin_sidecars = [_sidecar(Path(t.get("path", ""))) for t in twins if t.get("path") != str(path)]
+    for twin, twin_sidecar in zip(twins, twin_sidecars + [{}] * len(twins)):
         if not sidecar:
-            sidecar = _sidecar(Path(twin.get("path", "")))
+            sidecar = dict(twin_sidecar)
         for key in ("url", "uploader", "title", "license"):
             if twin.get(key) and not row.get(key):
                 row = dict(row, **{key: twin[key]})
@@ -155,20 +179,27 @@ def describe(path, kind: str, *, state: dict | None = None, provenance: str | No
     url = row.get("url") or sidecar.get("webpage_url") or sidecar.get("original_url")
     # Every place that names these bytes' origin; two different YouTube videos is a contradiction.
     candidates = [row.get("url"), sidecar.get("webpage_url"), sidecar.get("original_url"),
-                  evidence.get("webpage_url"), evidence.get("url"), *(t.get("url") for t in twins)]
-    ids = [youtube_id(u) for u in candidates if isinstance(u, str)]
-    if str(sidecar.get("extractor_key", "")).lower() == "youtube" and VIDEO_ID.fullmatch(str(sidecar.get("id", ""))):
-        ids.append(sidecar["id"])
-    ids = list(dict.fromkeys(i for i in ids if i))
+                  *(evidence.get(k) for k in EVIDENCE_URL_KEYS), *(t.get("url") for t in twins),
+                  *(c.get(k) for c in twin_sidecars for k in ("webpage_url", "original_url"))]
+    seen = [_youtube_identity(u) for u in candidates]
+    ids = [i for _, i in seen if i]
+    for side in [sidecar, *twin_sidecars]:
+        if str(side.get("extractor_key", "")).lower() == "youtube" and VIDEO_ID.fullmatch(str(side.get("id", ""))):
+            ids.append(side["id"])
+    ids = list(dict.fromkeys(ids))
     vid = (youtube_id(url) if url else None) or (ids[0] if ids else None)
+    # Same work named twice: catalogue row and grant evidence page must agree (non-YouTube too).
+    pages = {_page(u) for u in (row.get("url"), evidence.get("webpage_url"), evidence.get("url"))
+             if _page(u) and not _youtube_identity(u)[0]}
     meta = {k: sidecar.get(k) for k in ("title", "uploader", "channel", "channel_url", "license",
                                          "availability", "artist", "album", "track", "extractor_key")}
     meta["description"] = str(sidecar.get("description") or "")[:3000]
-    for key in ("title", "uploader", "license", "artist", "isrc", "spotify_uri"):
+    for key in ("title", "uploader", "license", "artist", "isrc", "spotify_uri", "copyright"):
         if row.get(key) and not meta.get(key):
             meta[key] = row[key]
     return dict(path=str(path), kind=kind, exists=path.is_file(), sha256=digest, url=url,
-                youtube_id=vid, youtube_ids=ids,
+                youtube_id=vid, youtube_ids=ids, other_pages=sorted(pages),
+                youtube_url_without_id=any(is_yt and not i for is_yt, i in seen),
                 provenance=provenance or ("downloaded_url" if url else "local_file"),
                 has_sidecar=bool(sidecar), metadata=meta)
 
@@ -186,6 +217,8 @@ def _hints(source: dict) -> dict:
     for key in ("isrc", "spotify_uri"):
         if meta.get(key):
             commercial.append(key)
+    if re.search(r"℗|\(p\)", str(meta.get("copyright") or "").lower()):
+        commercial.append("phonographic copyright")
     if str(meta.get("extractor_key") or "").lower() == "youtube" and meta.get("track") and (
             meta.get("artist") or meta.get("album")):
         commercial.append("youtube music metadata")  # 'Music in this video' credits a label release
@@ -195,11 +228,24 @@ def _hints(source: dict) -> dict:
 EVIDENCE_URL_KEYS = ("webpage_url", "url", "source_url", "foreign_landing_url", "original_url")
 
 
+def _page(url) -> str | None:
+    """A real https page: host with a dot, no credentials, no spaces. Normalised for comparison."""
+    if not isinstance(url, str) or url != url.strip() or " " in url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or "." not in host or parsed.username or parsed.password:
+        return None
+    return host.removeprefix("www.") + parsed.path.rstrip("/") + ("?" + parsed.query if parsed.query else "")
+
+
 def _evidence_url(grant: dict) -> bool:
     """A declared licence counts only with the page where it was read."""
     evidence = grant.get("evidence")
-    return isinstance(evidence, dict) and any(
-        isinstance(evidence.get(k), str) and evidence[k].startswith("https://") for k in EVIDENCE_URL_KEYS)
+    return isinstance(evidence, dict) and any(_page(evidence.get(k)) for k in EVIDENCE_URL_KEYS)
 
 
 def _grant_terms(grant: dict) -> dict | None:
@@ -227,8 +273,10 @@ def assess(source: dict, *, grant: dict | None = None, claims=(), youtube: dict 
     if hits:
         reject.append("PREVIOUS_CONTENT_ID_CLAIM")
         basis.append("claim_registry")
-    if len(ids) > 1:
+    if len(ids) > 1 or len(source.get("other_pages") or ()) > 1:
         unverified.append("PROVENANCE_CONFLICT")
+    if source.get("youtube_url_without_id"):
+        unverified.append("YOUTUBE_URL_WITHOUT_ID")
     availability = source["metadata"].get("availability")
     if availability not in (None, "public"):
         # yt-dlp saw it private, members-only, paid or login-gated when it was fetched.
@@ -264,7 +312,8 @@ def assess(source: dict, *, grant: dict | None = None, claims=(), youtube: dict 
     hints = _hints(source)
     if hints["sports_rightsholder"] and not commercial_grant:
         reject.append("SPORTS_RIGHTSHOLDER_FOOTAGE")
-    if source["kind"] == "audio" and hints["commercial_music"] and not commercial_grant:
+    # A video's own soundtrack reaches the montage too (ambience, featured audio).
+    if hints["commercial_music"] and not commercial_grant:
         reject.append("COMMERCIAL_MUSIC_WITHOUT_LICENCE")
     if declared and not commercial_grant:
         # The most restrictive declaration wins: a grant cannot erase the source's own NC/ND.
@@ -278,12 +327,31 @@ def assess(source: dict, *, grant: dict | None = None, claims=(), youtube: dict 
     if commercial_grant:
         basis.append("documented_commercial_grant")
         reliability = "documented_licence"
+        own = grant_terms or {}
+        # The grant's flags cannot contradict its own licence text.
+        if own and not own["commercial"]:
+            reject.append("NON_COMMERCIAL_LICENCE")
+        if own and not own["modification"]:
+            reject.append("LICENCE_FORBIDS_MODIFICATION")
+        verified = str(grant.get("rights_verified_at") or "")
+        try:
+            when = (datetime.fromisoformat(verified.replace("Z", "+00:00")) if verified
+                    else datetime.fromtimestamp(float(grant["rights_verified_at"]), timezone.utc))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            if when > datetime.now(timezone.utc):
+                unverified.append("RIGHTS_VERIFIED_IN_THE_FUTURE")
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            unverified.append("RIGHTS_VERIFICATION_DATE_INVALID")
     elif personal_grant and grant.get("basis") == "user_attested_not_independently_verified":
         unverified.append("USER_ATTESTATION_ONLY")
         reliability = "user_attestation"
     elif personal_grant:
         basis.append("recorded_grant")
-        trusted = grant.get("basis") == "CC_BY_from_user_trusted_publisher"
+        evidence = grant.get("evidence")
+        # Discovery writes this basis with the screened candidate (page + publisher) as evidence.
+        trusted = (grant.get("basis") == "CC_BY_from_user_trusted_publisher" and isinstance(evidence, dict)
+                   and bool(_page(evidence.get("webpage_url"))) and bool(evidence.get("channel_url")))
         if terms is None:
             unverified.append("LICENCE_UNKNOWN")
         elif grant_terms is None and not trusted:
