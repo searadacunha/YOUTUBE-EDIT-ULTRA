@@ -26,6 +26,11 @@
 - `--publishable` keeps only accepted sources; commercial mode applies it too.
   Personal edits keep their sources and get a "publication not authorized"
   warning.
+- A licence is established only by the grant itself (with the https page where
+  it was read) or by a trusted-publisher grant; an uploader's own CC label or the
+  API status can restrict, never accept. Contradictory YouTube provenance, sources
+  restricted when fetched and YouTube Music credits on extracted audio are no
+  longer accepted.
 - Upload receipts record the rights gate. `ultra publication-check` re-checks
   the sources and requires a finished Studio check plus `--approve` before
   reporting `READY_FOR_MANUAL_PUBLICATION`; it never changes visibility.

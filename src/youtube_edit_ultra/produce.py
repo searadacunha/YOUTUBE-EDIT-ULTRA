@@ -330,7 +330,7 @@ def locked(args, folder, *, output=None, prepare_only=False):
                             genre=entry.get("style", ""),
                         )
                         grant = {k: value for k, value in entry.items()
-                                 if k not in {'url', 'kind', 'athlete', 'style', 'title', 'artist'}}
+                                 if k not in {'url', 'kind', 'athlete', 'style', 'title', 'artist', 'basis'}}
                         grant.setdefault('reuse', True)
                         state['permissions'][r['sha256']] = grant
                         for key in ('release_date', 'language', 'country'):
@@ -732,7 +732,8 @@ def _permission_from_args(args, previous=None):
     if not isinstance(data, dict):
         raise UltraError('Rights JSON must be an object')
     mode = getattr(args, 'mode', None) or data.pop('scope', 'personal')
-    for key in ('scope', 'mode', 'evidence', 'reuse', 'previous'):
+    # 'basis' is written only by the pipeline (e.g. trusted CC discovery), never declared by the user.
+    for key in ('scope', 'mode', 'evidence', 'reuse', 'previous', 'basis'):
         data.pop(key, None)
     return cat.permission_grant(args.evidence, mode=mode, previous=previous, **data)
 

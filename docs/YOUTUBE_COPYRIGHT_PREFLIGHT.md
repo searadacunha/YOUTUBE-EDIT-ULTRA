@@ -63,11 +63,20 @@ claim hints, check date, reliability and the decision:
 | Decision | When |
 |---|---|
 | `ACCEPTED` | recorded grant with evidence, licence allowing modification and redistribution (CC BY, BY-SA, CC0, PDM, Mixkit music) or an explicit commercial grant (`grant_allows(..., "commercial")`), fresh API check for YouTube-origin files, no negative signal |
-| `REJECTED` | file missing; source removed/private; any `regionRestriction` (worldwide or partial); `licensedContent=true`; embedding disabled; claim already read in Studio (`excluded_media.json`, by YouTube id or sha256, whole source even for a windowed claim); sports rightsholder; label-distributed music; ND or NC licence; CC label contradicted by the API |
-| `UNVERIFIED` | no grant, local file without provenance, user attestation only, licence unknown, API key missing, quota/HTTP error, offline, incomplete API metadata, unreadable claim registry |
+| `REJECTED` | file missing; source removed/private (API) or private, members-only, paid or login-gated when yt-dlp fetched it; any `regionRestriction` (worldwide or partial); `licensedContent=true`; embedding disabled; claim already read in Studio (`excluded_media.json`, by YouTube id or sha256, whole source even for a windowed claim); sports rightsholder; label-distributed music; ND or NC licence; CC label contradicted by the API |
+| `UNVERIFIED` | no grant, local file without provenance, user attestation only, licence unknown, licence declared only by the source (uploader label or API) without a trusted-publisher grant, licence recorded without the https page where it was read, several YouTube videos named for the same bytes, API key missing, quota/HTTP error, offline, incomplete API metadata, unreadable claim registry |
 
 Identity follows content: a copy or hardlink of a catalogued file inherits its
-YouTube id, uploader and title, not only its grant. When the grant and the
+YouTube id, uploader and title, not only its grant. Every URL naming the bytes
+counts (catalogue rows, every copy's sidecar, every evidence URL, any YouTube
+spelling such as music.youtube.com, youtube-nocookie.com, /v/ or http); two
+different videos or pages are a `PROVENANCE_CONFLICT`. The trusted-publisher
+basis is written only by discovery, never accepted from `--rights-json`. A
+commercial grant cannot carry an NC/ND licence or a future verification date.
+Label music signals (Topic, VEVO, YouTube Music credits, ISRC including MP3
+TSRC, ℗ copyright) also apply to a video's own soundtrack.
+`publication-check` refuses a `--state-dir` other than the catalogue the report
+was made with. When the grant and the
 source's own metadata declare different licences, the most restrictive wins.
 Registry rows accept a bare id, a YouTube URL or a sha256 (any case); a row
 that can never match is refused.
