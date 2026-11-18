@@ -63,8 +63,8 @@ claim hints, check date, reliability and the decision:
 | Decision | When |
 |---|---|
 | `ACCEPTED` | recorded grant with evidence, licence allowing modification and redistribution (CC BY, BY-SA, CC0, PDM, Mixkit music) or an explicit commercial grant (`grant_allows(..., "commercial")`), fresh API check for YouTube-origin files, no negative signal |
-| `REJECTED` | file missing; source removed/private; any `regionRestriction` (worldwide or partial); `licensedContent=true`; embedding disabled; claim already read in Studio (`excluded_media.json`, by YouTube id or sha256, whole source even for a windowed claim); sports rightsholder; label-distributed music; ND or NC licence; CC label contradicted by the API |
-| `UNVERIFIED` | no grant, local file without provenance, user attestation only, licence unknown, API key missing, quota/HTTP error, offline, incomplete API metadata, unreadable claim registry |
+| `REJECTED` | file missing; source removed/private (API) or private, members-only, paid or login-gated when yt-dlp fetched it; any `regionRestriction` (worldwide or partial); `licensedContent=true`; embedding disabled; claim already read in Studio (`excluded_media.json`, by YouTube id or sha256, whole source even for a windowed claim); sports rightsholder; label-distributed music; ND or NC licence; CC label contradicted by the API |
+| `UNVERIFIED` | no grant, local file without provenance, user attestation only, licence unknown, licence declared only by the source (uploader label or API) without a trusted-publisher grant, licence recorded without the https page where it was read, several YouTube videos named for the same bytes, API key missing, quota/HTTP error, offline, incomplete API metadata, unreadable claim registry |
 
 Identity follows content: a copy or hardlink of a catalogued file inherits its
 YouTube id, uploader and title, not only its grant. When the grant and the

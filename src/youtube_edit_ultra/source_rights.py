@@ -153,17 +153,23 @@ def describe(path, kind: str, *, state: dict | None = None, provenance: str | No
         if value and not sidecar.get(key):
             sidecar[key] = value
     url = row.get("url") or sidecar.get("webpage_url") or sidecar.get("original_url")
-    vid = youtube_id(url) if url else None
-    if vid is None and str(sidecar.get("extractor_key", "")).lower() == "youtube":
-        vid = sidecar.get("id")
+    # Every place that names these bytes' origin; two different YouTube videos is a contradiction.
+    candidates = [row.get("url"), sidecar.get("webpage_url"), sidecar.get("original_url"),
+                  evidence.get("webpage_url"), evidence.get("url"), *(t.get("url") for t in twins)]
+    ids = [youtube_id(u) for u in candidates if isinstance(u, str)]
+    if str(sidecar.get("extractor_key", "")).lower() == "youtube" and VIDEO_ID.fullmatch(str(sidecar.get("id", ""))):
+        ids.append(sidecar["id"])
+    ids = list(dict.fromkeys(i for i in ids if i))
+    vid = (youtube_id(url) if url else None) or (ids[0] if ids else None)
     meta = {k: sidecar.get(k) for k in ("title", "uploader", "channel", "channel_url", "license",
-                                         "availability", "artist", "album", "track")}
+                                         "availability", "artist", "album", "track", "extractor_key")}
     meta["description"] = str(sidecar.get("description") or "")[:3000]
     for key in ("title", "uploader", "license", "artist", "isrc", "spotify_uri"):
         if row.get(key) and not meta.get(key):
             meta[key] = row[key]
     return dict(path=str(path), kind=kind, exists=path.is_file(), sha256=digest, url=url,
-                youtube_id=vid, provenance=provenance or ("downloaded_url" if url else "local_file"),
+                youtube_id=vid, youtube_ids=ids,
+                provenance=provenance or ("downloaded_url" if url else "local_file"),
                 has_sidecar=bool(sidecar), metadata=meta)
 
 
@@ -180,7 +186,20 @@ def _hints(source: dict) -> dict:
     for key in ("isrc", "spotify_uri"):
         if meta.get(key):
             commercial.append(key)
+    if str(meta.get("extractor_key") or "").lower() == "youtube" and meta.get("track") and (
+            meta.get("artist") or meta.get("album")):
+        commercial.append("youtube music metadata")  # 'Music in this video' credits a label release
     return dict(sports_rightsholder=sports, commercial_music=commercial)
+
+
+EVIDENCE_URL_KEYS = ("webpage_url", "url", "source_url", "foreign_landing_url", "original_url")
+
+
+def _evidence_url(grant: dict) -> bool:
+    """A declared licence counts only with the page where it was read."""
+    evidence = grant.get("evidence")
+    return isinstance(evidence, dict) and any(
+        isinstance(evidence.get(k), str) and evidence[k].startswith("https://") for k in EVIDENCE_URL_KEYS)
 
 
 def _grant_terms(grant: dict) -> dict | None:
@@ -202,12 +221,20 @@ def assess(source: dict, *, grant: dict | None = None, claims=(), youtube: dict 
     personal_grant = cat.grant_allows(grant, "personal")
     if not source.get("exists"):
         reject.append("SOURCE_FILE_MISSING")
-    hits = [c for c in claims if (c.get("id") and c["id"] == source.get("youtube_id"))
+    ids = set(source.get("youtube_ids") or ([source["youtube_id"]] if source.get("youtube_id") else []))
+    hits = [c for c in claims if (c.get("id") and c["id"] in ids)
             or (c.get("sha256") and c["sha256"] == source.get("sha256"))]
     if hits:
         reject.append("PREVIOUS_CONTENT_ID_CLAIM")
         basis.append("claim_registry")
-    declared = [t for t in (_grant_terms(grant), licence_terms(source["metadata"].get("license"))) if t]
+    if len(ids) > 1:
+        unverified.append("PROVENANCE_CONFLICT")
+    availability = source["metadata"].get("availability")
+    if availability not in (None, "public"):
+        # yt-dlp saw it private, members-only, paid or login-gated when it was fetched.
+        reject.append(f"SOURCE_AVAILABILITY_{str(availability).upper()}")
+    grant_terms = _grant_terms(grant)
+    declared = [t for t in (grant_terms, licence_terms(source["metadata"].get("license"))) if t]
     terms = declared[0] if declared else None
     geo = None
     if source.get("youtube_id"):
@@ -256,8 +283,14 @@ def assess(source: dict, *, grant: dict | None = None, claims=(), youtube: dict 
         reliability = "user_attestation"
     elif personal_grant:
         basis.append("recorded_grant")
+        trusted = grant.get("basis") == "CC_BY_from_user_trusted_publisher"
         if terms is None:
             unverified.append("LICENCE_UNKNOWN")
+        elif grant_terms is None and not trusted:
+            # The uploader's own CC label proves nothing about who owns the footage.
+            unverified.append("LICENCE_ONLY_DECLARED_BY_SOURCE")
+        elif grant_terms is not None and not (trusted or _evidence_url(grant)):
+            unverified.append("LICENCE_WITHOUT_SOURCE_EVIDENCE")
         reliability = "declared_licence" if terms else "unlicensed_grant"
     else:
         unverified.append("NO_RECORDED_PERMISSION" if source.get("url") or source.get("has_sidecar")

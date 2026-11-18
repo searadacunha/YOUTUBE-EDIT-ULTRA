@@ -269,7 +269,8 @@ def test_batch_lookup_uses_one_call_per_fifty_ids(tmp_path):
 
 
 def test_report_marks_mixed_sources_not_publishable(tmp_path):
-    good, state = media(tmp_path, "good.mp3", grant=catalogue.permission_grant(dict(license=CC_BY)))
+    good, state = media(tmp_path, "good.mp3", grant=catalogue.permission_grant(
+        dict(license=CC_BY, source_url="https://example.org/track")))
     bad, state = media(tmp_path, "bad.mp4", state=state)
     records = gate([(str(good), "audio", None), (str(bad), "video", None)], state=state)
     report = source_rights.write_report(tmp_path, records)
@@ -387,3 +388,61 @@ def test_unlisted_source_and_empty_reports_are_not_publishable(tmp_path):
     record = decide(path, state, items=[api_item(status={"privacyStatus": "unlisted"})])
     assert record["decision"] == REJECTED and "SOURCE_NOT_PUBLIC" in record["reasons"]
     assert source_rights.summary([])["publishable"] is False
+
+
+# False acceptances found by the 2026-11-18 audit.
+
+def test_uploader_cc_label_with_a_plain_text_grant_is_not_enough(tmp_path):
+    meta = dict(webpage_url=f"https://www.youtube.com/watch?v={VID}", id=VID, uploader="Someone",
+                license="Creative Commons Attribution license (reuse allowed)")
+    path, state = media(tmp_path, f"source-{VID}.mp4", sidecar=meta,
+                        grant=catalogue.permission_grant("authorize-url: found it online"))
+    record = decide(path, state, items=[api_item()])
+    assert record["decision"] == UNVERIFIED and record["reasons"] == ["LICENCE_ONLY_DECLARED_BY_SOURCE"]
+
+
+def test_declared_licence_needs_the_page_where_it_was_read(tmp_path):
+    path, state = media(tmp_path, "clip.mp4", grant=catalogue.permission_grant(dict(license=CC_BY)))
+    assert decide(path, state)["reasons"] == ["LICENCE_WITHOUT_SOURCE_EVIDENCE"]
+    state["permissions"][catalogue.sha256(path)] = catalogue.permission_grant(
+        dict(license=CC_BY, source_url="http://example.org/insecure"))
+    assert decide(path, state)["reasons"] == ["LICENCE_WITHOUT_SOURCE_EVIDENCE"]
+
+
+def test_contradictory_youtube_provenance_is_unverified_and_every_id_is_checked(tmp_path):
+    other = "dQw4w9WgXcQ"
+    path, state = youtube_source(tmp_path, webpage_url=f"https://www.youtube.com/watch?v={other}", id=other)
+    state["media"][str(path.resolve())] = dict(path=str(path.resolve()), sha256=catalogue.sha256(path),
+                                               url=f"https://www.youtube.com/watch?v={VID}")
+    record = decide(path, state, items=[api_item()])
+    assert record["decision"] == UNVERIFIED and "PROVENANCE_CONFLICT" in record["reasons"]
+    claimed = decide(path, state, items=[api_item()], claims=[dict(id=other, reason="claimed")])
+    assert claimed["decision"] == REJECTED and "PREVIOUS_CONTENT_ID_CLAIM" in claimed["reasons"]
+
+
+@pytest.mark.parametrize("availability", ["subscriber_only", "premium_only", "needs_auth", "private"])
+def test_source_restricted_when_downloaded_is_rejected(tmp_path, availability):
+    path, state = youtube_source(tmp_path, availability=availability)
+    record = decide(path, state, items=[api_item()])
+    assert record["decision"] == REJECTED and f"SOURCE_AVAILABILITY_{availability.upper()}" in record["reasons"]
+
+
+def test_youtube_music_credits_mark_extracted_audio_as_commercial(tmp_path):
+    path, state = youtube_source(tmp_path, extractor_key="Youtube", track="Gasolina", artist="Daddy Yankee")
+    path = path.rename(path.with_suffix(".mp3"))
+    path.with_name(f"source-{VID}.info.json").rename(path.with_suffix(".info.json"))
+    record = decide(path, state, kind="audio", items=[api_item()])
+    assert "COMMERCIAL_MUSIC_WITHOUT_LICENCE" in record["reasons"]
+    assert "youtube music metadata" in record["claim_hints"]["commercial_music"]
+
+
+def test_oversized_api_answer_is_unknown(tmp_path):
+    from youtube_edit_ultra.youtube_preflight import lookup
+
+    base = json.dumps({"items": [api_item()], "pad": ""})
+    # Valid JSON one byte over the cap: only the size limit can refuse it.
+    huge = Response({})
+    huge.data = json.dumps({"items": [api_item()], "pad": " " * (1_000_001 - len(base))}).encode()
+    assert len(huge.data) == 1_000_001
+    with patch("youtube_edit_ultra.youtube_preflight.urlopen", return_value=huge):
+        assert lookup([VID], api_key="k")[VID]["status"] == "UNKNOWN"
