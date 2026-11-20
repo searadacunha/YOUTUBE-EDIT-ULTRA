@@ -11,8 +11,10 @@ permission and a trusted Creative Commons publisher. It now also calls the
 official YouTube Data API v3 for **automatically discovered YouTube candidates**.
 Any of these conditions exclude a candidate from automatic acquisition:
 
-- API shows regional restrictions (either an allowlist or a blocklist), even if
-  the current viewer can play the source.
+- API shows actual regional restrictions (an allowlist, including empty, or a
+  non-empty blocklist), even if the current viewer can play the source.
+  An explicitly empty `blocked: []` list means available in all countries
+  according to the YouTube API and is not itself a blocking signal.
 - `licensedContent=true` indicates content claimed by a YouTube partner.
 - Source lacks `creativeCommon` licence metadata, is not public or fully
   processed, or disallows embedded playback.
@@ -31,7 +33,7 @@ it in your shell without adding it to this repository:
 ```bash
 export YEU_YOUTUBE_API_KEY='YOUR_API_KEY'
 ultra inspect-youtube 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
-ueu create 'Terence Crawford — R&B 2000s — 10 minutes'
+ueu create 'Terence Crawford — R&B 2000s — 10 minutes' --publishable
 ```
 
 The inspect result is `AVAILABLE_METADATA_ONLY`, `REJECT`, or `UNKNOWN`.
@@ -39,6 +41,18 @@ The first **does not mean** Content ID clean, rights-cleared, or publishable.
 The decision and its reasons are stored on candidates in
 `discovery_report.json`. Missing keys or quota failures block newly discovered
 YouTube candidates instead of approving them by default.
+
+For a montage intended for YouTube, **pass `--publishable`** with
+`ueu create` or `ultra produce` (or select commercial mode with documented
+commercial grants). This is intentionally not the default: personal offline
+editing may use local assets whose publication rights are unknown.
+With `--publishable`, cached and locally indexed footage is screened **before**
+its duration counts toward the requested montage and before source discovery.
+A risky local recording therefore cannot suppress the search for alternative
+cleared footage. Pre-discovery decisions are saved in
+`initial_source_preflight.json`; final music/video decisions remain in
+`rights_gate_report.json`. If there are no admissible replacements, the
+production stops rather than falsely claiming the output is copyright-clean.
 
 Existing locally authorised media and explicit authorised URLs retain their
 existing permission flow; this metadata check is **not** a substitute for a
@@ -63,7 +77,7 @@ claim hints, check date, reliability and the decision:
 | Decision | When |
 |---|---|
 | `ACCEPTED` | recorded grant with evidence, licence allowing modification and redistribution (CC BY, BY-SA, CC0, PDM, Mixkit music) or an explicit commercial grant (`grant_allows(..., "commercial")`), fresh API check for YouTube-origin files, no negative signal |
-| `REJECTED` | file missing; source removed/private; any `regionRestriction` (worldwide or partial); `licensedContent=true`; embedding disabled; claim already read in Studio (`excluded_media.json`, by YouTube id or sha256, whole source even for a windowed claim); sports rightsholder; label-distributed music; ND or NC licence; CC label contradicted by the API |
+| `REJECTED` | file missing; source removed/private; actual `regionRestriction` (worldwide or partial; excludes empty `blocked: []`); `licensedContent=true`; embedding disabled; claim already read in Studio (`excluded_media.json`, by YouTube id or sha256, whole source even for a windowed claim); sports rightsholder; label-distributed music; ND or NC licence; CC label contradicted by the API |
 | `UNVERIFIED` | no grant, local file without provenance, user attestation only, licence unknown, API key missing, quota/HTTP error, offline, incomplete API metadata, unreadable claim registry |
 
 Identity follows content: a copy or hardlink of a catalogued file inherits its
