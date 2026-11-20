@@ -152,6 +152,21 @@ def annotated_coverage(videos, sport):
     return sum(a.duration for a in validate_no_overlap(actions))
 
 
+def prefilter_publishable_videos(videos, state, *, offline=False):
+    """Drop unverified or known-restricted footage before measuring usable coverage.
+
+    This runs before discovery so a rights-rejected local collection cannot
+    suppress the search for alternative sources. It deliberately fails closed.
+    """
+    from .source_rights import ACCEPTED, gate as rights_gate
+    checks = rights_gate(
+        [(r["path"], "video", state.get("permissions", {}).get(r["sha256"], {}).get("basis")
+          or "catalogue") for r in videos],
+        state=state, offline=offline)
+    allowed = {r["path"] for r in checks if r["decision"] == ACCEPTED}
+    return [r for r in videos if str(Path(r["path"]).resolve()) in allowed], checks
+
+
 def readiness(state, athlete, target, videos, music, style="", mode="personal"):
     local = [r for r in state["media"].values() if r.get("available") and relevant_video(r, athlete)]
     local = list({r["sha256"]: r for r in local}.values())
@@ -339,6 +354,23 @@ def locked(args, folder, *, output=None, prepare_only=False):
                             videos.append(r)
                 except (UltraError, OSError) as e:
                     report["warnings"].append(str(e))
+        # A rights-rejected local clip must not count as available footage and
+        # prevent discovery of a safer alternative. Keep the full audit evidence.
+        publishable = mode == "commercial" or bool(getattr(args, "publishable", False))
+        if publishable and videos:
+            original_count = len(videos)
+            videos, preliminary_checks = prefilter_publishable_videos(
+                videos, state, offline=bool(args.offline))
+            cat.save(out / "initial_source_preflight.json", dict(
+                records=preliminary_checks,
+                accepted_count=len(videos),
+                rejected_or_unverified_count=original_count - len(videos),
+                scope="Pre-discovery source screen; final gate still checks music and footage"))
+            if len(videos) != original_count:
+                report["warnings"].append(
+                    f"{original_count - len(videos)} vidéo(s) écartée(s) AVANT découverte "
+                    "(droits non vérifiés, restriction territoriale ou signal de réclamation) : "
+                    "voir initial_source_preflight.json")
         if not args.offline and annotated_coverage(videos, request['sport']) < request["duration_seconds"]:
             try:
                 print("Recherche publique des sources et de leurs licences", flush=True)
@@ -450,7 +482,6 @@ def locked(args, folder, *, output=None, prepare_only=False):
             music, excluded = cat.select_music(state, request["style"], playlist, mode=mode)
         # One rights/risk decision per selected source, re-checked now (cache and old grants included).
         from .source_rights import ACCEPTED, gate as rights_gate, write_report as write_rights
-        publishable = mode == "commercial" or bool(getattr(args, "publishable", False))
         records = rights_gate(
             [(r["path"], "video", state["permissions"].get(r["sha256"], {}).get("basis") or "catalogue")
              for r in videos]
