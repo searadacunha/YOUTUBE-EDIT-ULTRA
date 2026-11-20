@@ -288,8 +288,12 @@ def test_commercial_mode_refuses_a_claimed_source_despite_commercial_grants(tmp_
     monkeypatch.setenv("YEU_CLAIMS_FILE", str(registry))
     assert jobs.main(args + ["--mode", "commercial"]) == 2
     job, _ = job_state(tmp_path)
-    gate = catalogue.read(job / "rights_gate_report.json")
-    assert [r["decision"] for r in gate["records"] if r["kind"] == "video"] == ["REJECTED"]
+    # A claimed source is now excluded before discovery, not passed to the
+    # final gate. The rejection must remain documented in the preflight report.
+    preflight = catalogue.read(job / "initial_source_preflight.json")
+    assert [r["decision"] for r in preflight["records"] if r["kind"] == "video"] == ["REJECTED"]
+    assert preflight["rejected_or_unverified_count"] == 1
+    assert "PREVIOUS_CONTENT_ID_CLAIM" in preflight["records"][0]["reasons"]
 
 
 @needs_ffmpeg
