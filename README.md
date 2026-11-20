@@ -352,11 +352,23 @@ metadata alone cannot predict Content ID claims or license reuse. Missing API
 keys or unsuccessful lookups exclude newly discovered YouTube sources from
 automatic acquisition.
 
+For **YouTube-bound** edits, create with `--publishable` from the start:
+
+```bash
+ueu create "Terence Crawford — R&B 2000s — 10 minutes" --publishable
+```
+
+This filters cached/local sources *before* judging whether there is enough
+footage, so blocked or unverified files cannot prevent discovery of acceptable
+alternatives. The results are in `initial_source_preflight.json`. If verified
+material is insufficient, the job stops rather than promising a claim-free video.
+
 Every montage also writes `rights_gate_report.json`: each video and music
 source, whatever its origin (discovery, catalogue, cache, local file, URL,
 prepared mix), is `ACCEPTED`, `REJECTED` or `UNVERIFIED`, with licence,
-evidence, geo restrictions, claim hints and check date. Add `--publishable`
-to `ueu create` or `ultra create` to keep only `ACCEPTED` sources. After the
+evidence, geo restrictions, claim hints and check date. `--publishable`
+filters accepted sources for `ueu create` and `ultra produce`; for explicit
+`ultra create` it refuses non-accepted sources. After the
 Studio checks finish, record the result; the command never changes visibility:
 
 ```bash
