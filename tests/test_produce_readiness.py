@@ -107,3 +107,32 @@ def test_long_raw_video_is_not_complete_action_coverage(tmp_path):
     path.with_suffix('.actions.json').write_text(json.dumps({'events': [
         dict(start=10, peak=15, end=20), dict(start=18, peak=23, end=28)]}))
     assert produce.annotated_coverage([row, row], 'boxing') == 19
+
+
+def test_publishable_prefilter_discards_claimed_and_unverified_before_coverage(tmp_path, monkeypatch):
+    import json
+    from youtube_edit_ultra import source_rights
+
+    state = catalogue.empty()
+    videos = []
+    for name in ("Safe", "Previously claimed", "Unknown rights"):
+        path = tmp_path / f"Canelo Alvarez {name}.mp4"
+        path.write_bytes(name.encode())
+        digest = catalogue.sha256(path)
+        videos.append(dict(path=str(path), sha256=digest, duration=120, kind="video"))
+    for row in videos[:2]:
+        state["permissions"][row["sha256"]] = catalogue.permission_grant(
+            dict(license="https://creativecommons.org/licenses/by/4.0/"))
+    exclusions = tmp_path / "previous_claims.json"
+    exclusions.write_text(json.dumps([{"sha256": videos[1]["sha256"], "reason": "Content ID block"}]))
+    monkeypatch.setenv("YEU_CLAIMS_FILE", str(exclusions))
+
+    selected, checks = produce.prefilter_publishable_videos(videos, state, offline=True)
+    assert [r["path"] for r in selected] == [videos[0]["path"]]
+    assert [r["decision"] for r in checks] == [
+        source_rights.ACCEPTED, source_rights.REJECTED, source_rights.UNVERIFIED
+    ]
+    assert "PREVIOUS_CONTENT_ID_CLAIM" in checks[1]["reasons"]
+    assert "NO_RECORDED_PERMISSION" not in checks[2]["reasons"]
+    assert "LOCAL_FILE_WITHOUT_PROVENANCE" in checks[2]["reasons"]
+    assert sum(r["duration"] for r in selected) == 120
