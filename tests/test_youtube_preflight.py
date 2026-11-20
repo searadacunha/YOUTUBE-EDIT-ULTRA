@@ -70,3 +70,14 @@ def test_api_response_success():
     with patch("youtube_edit_ultra.youtube_preflight.urlopen", return_value=MockResponse()) as req:
         assert screen(candidate, api_key="secret")["status"] == "AVAILABLE_METADATA_ONLY"
     assert "googleapis.com/youtube/v3/videos" in req.call_args.args[0]
+
+def test_empty_blocklist_is_explicitly_worldwide_available():
+    result = classify(VID, payload(contentDetails={"regionRestriction": {"blocked": []}}))
+    assert result["status"] == "AVAILABLE_METADATA_ONLY"
+    assert result["region_restriction"] == {"blocked": []}
+    assert "PARTIAL_OR_FULL_GEO_RESTRICTION" not in result["reasons"]
+
+
+def test_empty_allowlist_still_means_worldwide_block_and_invalid_geo_fails_closed():
+    assert classify(VID, payload(contentDetails={"regionRestriction": {"allowed": []}}))["status"] == "REJECT"
+    assert classify(VID, payload(contentDetails={"regionRestriction": {}}))["status"] == "REJECT"

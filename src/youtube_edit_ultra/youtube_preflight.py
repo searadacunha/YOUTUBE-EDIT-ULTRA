@@ -56,11 +56,16 @@ def classify(video_id: str, payload: dict) -> dict:
     geo = None
     region = details.get("regionRestriction")
     if region is not None:
-        reasons.append("PARTIAL_OR_FULL_GEO_RESTRICTION" if isinstance(region, dict)
-                       else "GEO_RESTRICTION_METADATA_UNVERIFIED")
-        if isinstance(region, dict):
-            # allowed=[] means blocked everywhere; blocked=[] means viewable everywhere.
-            geo = {k: list(region[k]) for k in ("allowed", "blocked") if isinstance(region.get(k), list)}
+        if isinstance(region, dict) and region.get("blocked") == [] and "allowed" not in region:
+            # The official API explicitly defines blocked=[] as viewable in every country.
+            # Keep the evidence but do not reject an unrestricted source.
+            geo = {"blocked": []}
+        else:
+            reasons.append("PARTIAL_OR_FULL_GEO_RESTRICTION" if isinstance(region, dict)
+                           else "GEO_RESTRICTION_METADATA_UNVERIFIED")
+            if isinstance(region, dict):
+                # allowed=[] means blocked everywhere. Unknown/malformed geo fields fail closed.
+                geo = {k: list(region[k]) for k in ("allowed", "blocked") if isinstance(region.get(k), list)}
     if details.get("licensedContent") is True:
         reasons.append("CONTENT_PARTNER_CLAIM_RISK")
     elif details.get("licensedContent") is not False:
