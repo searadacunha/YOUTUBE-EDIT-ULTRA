@@ -8,6 +8,20 @@ from dataclasses import asdict, dataclass
 from .events import Action
 from .media import UltraError
 
+# Who vouches for an action window, ranked ahead of confidence and beat fit.
+# A person reviewed it (2), a SoccerNet model predicted it (1), automatic
+# motion or vision-model candidates and unknown sources (0).
+PROVENANCE_RANK = {"annotation": 2, "human_review": 2, "visual_review": 2,
+                   "visual_sample_review": 2, "SoccerNet": 1, "heuristic_vlm": 0,
+                   "heuristic": 0}
+
+
+def provenance_rank(provenance: str) -> int:
+    """Rank a provenance; a merged ``mixed:a+b`` window keeps its weakest part."""
+    if provenance.startswith("mixed:"):
+        return min(PROVENANCE_RANK.get(p, 0) for p in provenance[6:].split("+"))
+    return PROVENANCE_RANK.get(provenance, 0)
+
 
 @dataclass(frozen=True)
 class Edit:
@@ -76,7 +90,8 @@ def _recover_plan(actions, edits, target, *, allow_repeat=False):
         at = prefix[-1].timeline_end if prefix else 0.0
         pool = [a for a in actions if a.duration <= target - at + .0001
                 and (allow_repeat or not clashes(a, prefix))]
-        pool = sorted(pool, key=lambda a: (-a.confidence, -a.duration, a.source, a.start))[:128]
+        pool = sorted(pool, key=lambda a: (-provenance_rank(a.provenance), -a.confidence,
+                                           -a.duration, a.source, a.start))[:128]
         stack, seen = [(at, 0, [])], 0
         while stack and seen < 5000:
             now, begin, selected = stack.pop()
@@ -117,13 +132,14 @@ def plan_edit(actions: list[Action], beats: list[float], target: float,
         if not fit:
             break
 
-        def score(a: Action) -> tuple[float, float, float]:
+        def score(a: Action) -> tuple[int, float, float, float]:
             # Musical impact, rich action context, variety; never trim action just to fit.
             beat_miss = nearest_beat_distance(t + (a.peak - a.start), beats)
             fairness = from_each[a.source] * 0.07
             repeat_penalty = used[(a.source, a.start, a.end)] * 15
             event_bonus = min(1.0, a.duration / 25.0)
-            return (a.confidence * 3.0 + event_bonus - beat_miss * 1.4
+            return (provenance_rank(a.provenance),
+                    a.confidence * 3.0 + event_bonus - beat_miss * 1.4
                     - fairness - repeat_penalty,
                     a.duration, -a.start)
         picked = max(fit, key=score)
@@ -164,6 +180,13 @@ def integrity_report(edits: list[Edit], actions: list[Action], target: float) ->
             failures.append(e.as_dict())
     annotation_count = sum(1 for e in edits if e.provenance in {"annotation", "SoccerNet"})
     heuristic_count = sum(1 for e in edits if e.provenance.startswith("heuristic"))
+    by_rank = {str(r): 0 for r in (2, 1, 0)}
+    for e in edits:
+        if e.provenance != "filler":
+            by_rank[str(provenance_rank(e.provenance))] += e.duration
+    by_rank = {r: round(s, 3) for r, s in by_rank.items()}
+    unreviewed = round(sum(s for r, s in by_rank.items() if r != "2"), 3)
+    filler_seconds = round(sum(e.duration for e in edits if e.provenance == "filler"), 3)
     return {
         "requested_seconds": target,
         "assembled_seconds": round(edits[-1].timeline_end, 3) if edits else 0,
@@ -175,5 +198,9 @@ def integrity_report(edits: list[Edit], actions: list[Action], target: float) ->
         "semantic_completeness_guaranteed": False,
         "reason_semantic_limit": "Même une fenêtre conservée entière peut manquer le début/fin réels de l'action si la détection est heuristique ou les annotations sont incorrectes.",
         "filler_segments": sum(e.provenance == "filler" for e in edits),
+        "selected_seconds_by_provenance_rank": by_rank,
+        "unreviewed_seconds_selected": unreviewed,
+        "filler_seconds": filler_seconds,
+        "filled_with_unreviewed_footage": unreviewed > 0 or filler_seconds > 0,
         "violations": failures,
     }

@@ -35,6 +35,20 @@
   the sources and requires a finished Studio check plus `--approve` before
   reporting `READY_FOR_MANUAL_PUBLICATION`; it never changes visibility.
 
+### Action selection by provenance
+
+- `plan_edit` and its bounded recovery rank candidates by provenance before
+  confidence and beat fit (`PROVENANCE_RANK` in `planner.py`): reviewed
+  actions, then SoccerNet predictions, then automatic candidates (motion
+  peaks and VLM-rated windows share one tier) and unknown sources. Merged
+  `mixed:` windows take their weakest part.
+  A reviewed action no longer loses its slot to a guess that lands nearer
+  the beat.
+- `action_integrity_report.json` adds selected seconds per provenance rank,
+  unreviewed and filler seconds, and `filled_with_unreviewed_footage`.
+  Existing keys are unchanged.
+- Synthetic regression tests only; not yet evaluated on real fight footage.
+
 Notable repository changes, not a promise of release packaging or production acceptance.
 
 ## Unreleased — 2026-10-31
