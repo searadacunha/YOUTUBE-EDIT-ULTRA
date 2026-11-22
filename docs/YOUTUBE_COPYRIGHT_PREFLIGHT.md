@@ -191,3 +191,6 @@ References:
 - [YouTube Data API video resource](https://developers.google.com/youtube/v3/docs/videos)
 - [YouTube Studio copyright checks](https://support.google.com/youtube/answer/17011221)
 - [How Content ID works](https://support.google.com/youtube/answer/2797370)
+
+
+The hardened grant validation rejects ambiguous media provenance, restricted-at-fetch items and undocumented reuse grants. An `ACCEPTED` result still requires the separate manual YouTube Studio copyright check before publication.

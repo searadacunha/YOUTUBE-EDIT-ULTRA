@@ -269,7 +269,8 @@ def test_batch_lookup_uses_one_call_per_fifty_ids(tmp_path):
 
 
 def test_report_marks_mixed_sources_not_publishable(tmp_path):
-    good, state = media(tmp_path, "good.mp3", grant=catalogue.permission_grant(dict(license=CC_BY)))
+    good, state = media(tmp_path, "good.mp3", grant=catalogue.permission_grant(
+        dict(license=CC_BY, source_url="https://example.org/track")))
     bad, state = media(tmp_path, "bad.mp4", state=state)
     records = gate([(str(good), "audio", None), (str(bad), "video", None)], state=state)
     report = source_rights.write_report(tmp_path, records)
@@ -353,7 +354,8 @@ def test_default_claim_registry_is_loaded_by_the_gate(tmp_path, monkeypatch):
 def test_youtube_cc_status_supplies_the_licence_when_none_is_declared(tmp_path):
     path, state = youtube_source(tmp_path, license=None)
     state["permissions"][catalogue.sha256(path)] = catalogue.permission_grant(
-        dict(webpage_url=f"https://www.youtube.com/watch?v={VID}"), basis="CC_BY_from_user_trusted_publisher")
+        dict(webpage_url=f"https://www.youtube.com/watch?v={VID}", channel_url="https://example.org/publisher"),
+        basis="CC_BY_from_user_trusted_publisher")
     record = decide(path, state, items=[api_item()])
     assert record["decision"] == ACCEPTED and record["licence"]["spdx"] == "CC-BY-3.0"
 
@@ -387,3 +389,179 @@ def test_unlisted_source_and_empty_reports_are_not_publishable(tmp_path):
     record = decide(path, state, items=[api_item(status={"privacyStatus": "unlisted"})])
     assert record["decision"] == REJECTED and "SOURCE_NOT_PUBLIC" in record["reasons"]
     assert source_rights.summary([])["publishable"] is False
+
+
+# False acceptances found by the 2026-11-18 audit.
+
+def test_uploader_cc_label_with_a_plain_text_grant_is_not_enough(tmp_path):
+    meta = dict(webpage_url=f"https://www.youtube.com/watch?v={VID}", id=VID, uploader="Someone",
+                license="Creative Commons Attribution license (reuse allowed)")
+    path, state = media(tmp_path, f"source-{VID}.mp4", sidecar=meta,
+                        grant=catalogue.permission_grant("authorize-url: found it online"))
+    record = decide(path, state, items=[api_item()])
+    assert record["decision"] == UNVERIFIED and record["reasons"] == ["LICENCE_ONLY_DECLARED_BY_SOURCE"]
+
+
+def test_declared_licence_needs_the_page_where_it_was_read(tmp_path):
+    path, state = media(tmp_path, "clip.mp4", grant=catalogue.permission_grant(dict(license=CC_BY)))
+    assert decide(path, state)["reasons"] == ["LICENCE_WITHOUT_SOURCE_EVIDENCE"]
+    state["permissions"][catalogue.sha256(path)] = catalogue.permission_grant(
+        dict(license=CC_BY, source_url="http://example.org/insecure"))
+    assert decide(path, state)["reasons"] == ["LICENCE_WITHOUT_SOURCE_EVIDENCE"]
+
+
+def test_contradictory_youtube_provenance_is_unverified_and_every_id_is_checked(tmp_path):
+    other = "dQw4w9WgXcQ"
+    path, state = youtube_source(tmp_path, webpage_url=f"https://www.youtube.com/watch?v={other}", id=other)
+    state["media"][str(path.resolve())] = dict(path=str(path.resolve()), sha256=catalogue.sha256(path),
+                                               url=f"https://www.youtube.com/watch?v={VID}")
+    record = decide(path, state, items=[api_item()])
+    assert record["decision"] == UNVERIFIED and "PROVENANCE_CONFLICT" in record["reasons"]
+    claimed = decide(path, state, items=[api_item()], claims=[dict(id=other, reason="claimed")])
+    assert claimed["decision"] == REJECTED and "PREVIOUS_CONTENT_ID_CLAIM" in claimed["reasons"]
+
+
+@pytest.mark.parametrize("availability", ["subscriber_only", "premium_only", "needs_auth", "private"])
+def test_source_restricted_when_downloaded_is_rejected(tmp_path, availability):
+    path, state = youtube_source(tmp_path, availability=availability)
+    record = decide(path, state, items=[api_item()])
+    assert record["decision"] == REJECTED and f"SOURCE_AVAILABILITY_{availability.upper()}" in record["reasons"]
+
+
+def test_youtube_music_credits_mark_extracted_audio_as_commercial(tmp_path):
+    path, state = youtube_source(tmp_path, extractor_key="Youtube", track="Gasolina", artist="Daddy Yankee")
+    path = path.rename(path.with_suffix(".mp3"))
+    path.with_name(f"source-{VID}.info.json").rename(path.with_suffix(".info.json"))
+    record = decide(path, state, kind="audio", items=[api_item()])
+    assert "COMMERCIAL_MUSIC_WITHOUT_LICENCE" in record["reasons"]
+    assert "youtube music metadata" in record["claim_hints"]["commercial_music"]
+
+
+def test_oversized_api_answer_is_unknown(tmp_path):
+    from youtube_edit_ultra.youtube_preflight import lookup
+
+    base = json.dumps({"items": [api_item()], "pad": ""})
+    # Valid JSON one byte over the cap: only the size limit can refuse it.
+    huge = Response({})
+    huge.data = json.dumps({"items": [api_item()], "pad": " " * (1_000_001 - len(base))}).encode()
+    assert len(huge.data) == 1_000_001
+    with patch("youtube_edit_ultra.youtube_preflight.urlopen", return_value=huge):
+        assert lookup([VID], api_key="k")[VID]["status"] == "UNKNOWN"
+
+
+
+# Second false-acceptance audit (2026-11-18, merged Ronaldo branch).
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="FFmpeg not installed")
+def test_trusted_publisher_basis_cannot_be_declared_by_the_user(tmp_path):
+    import subprocess
+    from youtube_edit_ultra.cli import main as ultra
+    (tmp_path / "media").mkdir()
+    clip = tmp_path / "media" / "vimeo.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=30:duration=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip)], check=True)
+    clip.with_suffix(".info.json").write_text(json.dumps(dict(webpage_url="https://vimeo.com/123456", license=CC_BY)))
+    spoof = tmp_path / "rights.json"
+    spoof.write_text(json.dumps(dict(basis="CC_BY_from_user_trusted_publisher")))
+    assert ultra(["--no-banner", "catalogue", "--state-dir", str(tmp_path / "s"), "authorize", str(clip),
+                  "--evidence", "found it online", "--rights-json", str(spoof)]) == 0
+    state = catalogue.read(tmp_path / "s/catalogue.json")
+    assert "basis" not in state["permissions"][catalogue.sha256(clip)]
+    assert decide(clip, state)["reasons"] == ["LICENCE_ONLY_DECLARED_BY_SOURCE"]
+    # A hand-written basis without the screened discovery evidence is not trusted either.
+    state["permissions"][catalogue.sha256(clip)]["basis"] = "CC_BY_from_user_trusted_publisher"
+    assert decide(clip, state)["decision"] == UNVERIFIED
+    state["permissions"][catalogue.sha256(clip)]["evidence"] = dict(license=CC_BY)  # no screened page/publisher
+    assert decide(clip, state)["reasons"] == ["LICENCE_WITHOUT_SOURCE_EVIDENCE"]
+
+
+def commercial(license, **extra):
+    return catalogue.permission_grant(
+        "Signed licence #12", mode="commercial", license=license, rights_verified_by="Rights reviewer",
+        rights_verified_at=extra.pop("at", "2026-11-17"), commercial_use=True, adaptation=True,
+        distribution=True, monetization=True, attribution_required=False)
+
+
+def test_commercial_flags_cannot_contradict_the_grant_own_licence(tmp_path):
+    path, state = media(tmp_path, "clip.mp4", grant=commercial("https://creativecommons.org/licenses/by-nc-nd/4.0/"))
+    record = decide(path, state)
+    assert record["decision"] == REJECTED
+    assert {"NON_COMMERCIAL_LICENCE", "LICENCE_FORBIDS_MODIFICATION"} <= set(record["reasons"])
+
+
+def test_commercial_grant_dated_in_the_future_is_unverified(tmp_path):
+    path, state = media(tmp_path, "clip.mp4", grant=commercial("Custom sync licence", at="2099-01-01"))
+    assert decide(path, state)["reasons"] == ["RIGHTS_VERIFIED_IN_THE_FUTURE"]
+
+
+@pytest.mark.parametrize("url", ["https://", "https:// ", "https://localhost/x", "https://user:pw@example.org/x"])
+def test_evidence_page_must_be_a_real_https_page(tmp_path, url):
+    path, state = media(tmp_path, "clip.mp4", grant=catalogue.permission_grant(dict(license=CC_BY, source_url=url)))
+    assert decide(path, state)["reasons"] == ["LICENCE_WITHOUT_SOURCE_EVIDENCE"]
+
+
+@pytest.mark.parametrize("key", ["source_url", "foreign_landing_url", "original_url"])
+def test_every_evidence_url_names_the_source(tmp_path, key):
+    grant = catalogue.permission_grant({"license": CC_BY, key: f"https://www.youtube.com/watch?v={VID}"})
+    path, state = media(tmp_path, "clip.mp4", grant=grant)
+    record = decide(path, state, items=[api_item()], claims=[dict(id=VID, reason="claimed")])
+    assert record["youtube_id"] == VID and "PREVIOUS_CONTENT_ID_CLAIM" in record["reasons"]
+
+
+@pytest.mark.parametrize("url", [f"https://music.youtube.com/watch?v={VID}", f"https://www.youtube-nocookie.com/embed/{VID}",
+                                 f"https://youtube.com/v/{VID}", f"http://www.youtube.com/watch?v={VID}"])
+def test_any_youtube_spelling_keeps_the_youtube_checks(tmp_path, url):
+    grant = catalogue.permission_grant(dict(license=CC_BY, webpage_url=url))
+    path, state = media(tmp_path, "clip.mp4", grant=grant)
+    record = decide(path, state, items=[api_item(contentDetails={"regionRestriction": {"allowed": ["PT"]}})])
+    assert record["youtube_id"] == VID and record["decision"] == REJECTED
+
+
+def test_youtube_url_without_a_usable_id_is_unverified(tmp_path):
+    grant = catalogue.permission_grant(dict(license=CC_BY, webpage_url="https://www.youtube.com/@SomeChannel"))
+    path, state = media(tmp_path, "clip.mp4", grant=grant)
+    assert "YOUTUBE_URL_WITHOUT_ID" in decide(path, state)["reasons"]
+
+
+def test_twin_sidecars_are_all_read(tmp_path):
+    other = "dQw4w9WgXcQ"
+    x, state = youtube_source(tmp_path)
+    y = tmp_path / "y.mp4"
+    y.write_bytes(x.read_bytes())
+    # Only the twin's page URL names the other video (no extractor id to fall back on).
+    y.with_suffix(".info.json").write_text(json.dumps(dict(webpage_url=f"https://www.youtube.com/watch?v={other}")))
+    digest = catalogue.sha256(x)
+    state["media"] = {str(p.resolve()): dict(path=str(p.resolve()), sha256=digest) for p in (x, y)}
+    record = decide(x, state, items=[api_item()], claims=[dict(id=other, reason="claimed")])
+    assert record["decision"] == REJECTED and "PROVENANCE_CONFLICT" in record["reasons"]
+
+
+def test_non_youtube_pages_naming_different_works_conflict(tmp_path):
+    grant = catalogue.permission_grant(dict(license=CC_BY, webpage_url="https://vimeo.com/222222222"))
+    path, state = media(tmp_path, "clip.mp4", grant=grant)
+    state["media"][str(path.resolve())] = dict(path=str(path.resolve()), sha256=catalogue.sha256(path),
+                                               url="https://vimeo.com/111111111")
+    assert "PROVENANCE_CONFLICT" in decide(path, state)["reasons"]
+    state["media"][str(path.resolve())]["url"] = "https://www.vimeo.com/222222222/"  # same page, other spelling
+    assert decide(path, state)["decision"] == ACCEPTED
+
+
+def test_commercial_music_in_a_video_soundtrack_is_rejected(tmp_path):
+    path, state = youtube_source(tmp_path, extractor_key="Youtube", track="Gasolina", artist="Daddy Yankee")
+    record = decide(path, state, items=[api_item()])
+    assert record["decision"] == REJECTED and "COMMERCIAL_MUSIC_WITHOUT_LICENCE" in record["reasons"]
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="FFmpeg not installed")
+@pytest.mark.parametrize("tags", [["-metadata", "TSRC=USUM70905526"], ["-metadata", "copyright=℗ 2004 El Cartel Records"]])
+def test_label_tags_read_by_the_scan_mark_music_as_commercial(tmp_path, tags):
+    import subprocess
+    root = tmp_path / "music"
+    root.mkdir()
+    song = root / "song.mp3"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=f=220:d=2", "-id3v2_version", "3",
+                    *tags, str(song)], check=True)
+    state = catalogue.scan([root], catalogue.empty())
+    state["permissions"][catalogue.sha256(song)] = catalogue.permission_grant(
+        dict(license=CC_BY, source_url="https://example.org/track"))
+    assert "COMMERCIAL_MUSIC_WITHOUT_LICENCE" in decide(song, state, kind="audio")["reasons"]

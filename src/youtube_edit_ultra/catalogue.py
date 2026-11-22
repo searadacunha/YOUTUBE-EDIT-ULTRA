@@ -323,13 +323,14 @@ def scan(roots, state):
                     )
                     state["media"][str(path)].update(
                         release_date=tags.get("date") or origin.get("release_date"),
-                        isrc=tags.get("isrc"),
+                        isrc=tags.get("isrc") or tags.get("tsrc"),  # MP3 ID3 keeps it as TSRC
                         spotify_uri=tags.get("spotify_uri"),
+                        copyright=tags.get("copyright"),
                     )
                     if cached.get("sha256") == digest:
                         # A timestamp-only refresh must not discard verified catalogue metadata.
                         for key in ("title", "artist", "genre", "release_date", "url", "uploader",
-                                    "license", "provenance", "isrc", "spotify_uri", "identity_evidence",
+                                    "license", "provenance", "isrc", "spotify_uri", "copyright", "identity_evidence",
                                     "usable_duration", "language", "country"):
                             if cached.get(key) is not None:
                                 state["media"][str(path)][key] = cached[key]

@@ -14,6 +14,7 @@ from youtube_edit_ultra.cli import main as ultra
 from test_jobs_integration import fixture_job, job_state
 
 CC_BY = "https://creativecommons.org/licenses/by/4.0/"
+RELEASE = "https://example.org/fixture-release"  # page where the fixture licence is published
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg not installed")
 
 
@@ -21,7 +22,7 @@ def licence_fixture_grants(state_dir, paths):
     state = catalogue.read(state_dir / "catalogue.json")
     for p in paths:
         state["permissions"][catalogue.sha256(p)] = catalogue.permission_grant(
-            dict(license=CC_BY, note="Owned synthetic fixture released by this test under CC BY 4.0"))
+            dict(license=CC_BY, source_url=RELEASE, note="Owned synthetic fixture released by this test under CC BY 4.0"))
     catalogue.save(state_dir / "catalogue.json", state)
 
 
@@ -101,7 +102,7 @@ def rendered_with_report(tmp_path, *, licensed):
     state_dir = tmp_path / "state"
     state = catalogue.empty()
     if licensed:
-        state["permissions"][catalogue.sha256(source)] = catalogue.permission_grant(dict(license=CC_BY))
+        state["permissions"][catalogue.sha256(source)] = catalogue.permission_grant(dict(license=CC_BY, source_url=RELEASE))
     catalogue.save(state_dir / "catalogue.json", state)
     from youtube_edit_ultra.source_rights import bind_montage, gate, write_report
     write_report(folder, gate([(str(source), "video", None)], state=state))
@@ -178,7 +179,7 @@ def test_rewritten_report_or_replaced_source_keeps_the_upload_private(tmp_path, 
     # Same path, other bytes, also granted: accepted today, but not what was edited.
     state = catalogue.read(state_dir / "catalogue.json")
     source.write_bytes(b"replacement bytes")
-    state["permissions"][catalogue.sha256(source)] = catalogue.permission_grant(dict(license=CC_BY))
+    state["permissions"][catalogue.sha256(source)] = catalogue.permission_grant(dict(license=CC_BY, source_url=RELEASE))
     catalogue.save(state_dir / "catalogue.json", state)
     assert check(receipt, state_dir, "--studio", "no-claims", "--approve") == 2
     assert any(r.startswith("SOURCE_CHANGED_SINCE_RENDER")
@@ -314,3 +315,72 @@ def test_receipt_without_upload_id_is_never_ready(tmp_path):
     receipt.write_text(json.dumps({"uploaded_privacy": "private"}))
     assert check(receipt, tmp_path, "--studio", "no-claims", "--approve") == 2
     assert "NO_UPLOAD_RECEIPT" in json.loads(receipt.read_text())["publication_check"]["reasons"]
+
+
+def test_empty_report_is_named_as_such(tmp_path, monkeypatch):
+    fake_youtube(monkeypatch)
+    folder = tmp_path / "render"
+    folder.mkdir()
+    video = folder / "montage.mp4"
+    video.write_bytes(b"montage without recorded sources")
+    from youtube_edit_ultra.source_rights import bind_montage, write_report
+    write_report(folder, [])
+    bind_montage(folder, catalogue.sha256(video))
+    assert ultra(["--no-banner", "publish", str(video)]) == 0
+    receipt = video.with_suffix(".youtube.json")
+    assert check(receipt, tmp_path, "--studio", "no-claims", "--approve") == 2
+    assert "RIGHTS_GATE_REPORT_EMPTY" in json.loads(receipt.read_text())["publication_check"]["reasons"]
+
+
+@needs_ffmpeg
+def test_offline_job_records_youtube_sources_as_not_rechecked(tmp_path):
+    args, _, video, _ = fixture_job(tmp_path)
+    video.with_suffix(".info.json").write_text(json.dumps(
+        dict(webpage_url="https://www.youtube.com/watch?v=jNQXAC9IVRw", id="jNQXAC9IVRw", extractor_key="Youtube")))
+    assert jobs.main(args) == 0
+    job, _ = job_state(tmp_path)
+    [record] = [r for r in catalogue.read(job / "rights_gate_report.json")["records"] if r["kind"] == "video"]
+    assert record["youtube_id"] == "jNQXAC9IVRw" and "OFFLINE_NOT_RECHECKED" in record["reasons"]
+
+
+@needs_ffmpeg
+def test_produce_saves_new_grants_before_the_render_subprocess_rechecks_them(tmp_path, monkeypatch):
+    from youtube_edit_ultra import music_sources, produce
+    _, state_dir, video, music = fixture_job(tmp_path, authorized=False)
+    licence_fixture_grants(state_dir, (music,))
+    state = catalogue.read(state_dir / "catalogue.json")
+    url = "https://example.org/canelo-clip.mp4"
+    state["authorized_urls"] = [dict(url=url, kind="video", athlete="Canelo Alvarez", reuse=True,
+                                     evidence=dict(license=CC_BY, source_url=RELEASE))]
+    catalogue.save(state_dir / "catalogue.json", state)
+    monkeypatch.setattr(music_sources, "acquire", lambda *a, **k: dict(candidates=[], attempts=[], errors=[]))
+
+    def download(urls, dest):  # simulated acquisition: the grant exists only in memory afterwards
+        dest.mkdir(parents=True, exist_ok=True)
+        copy = dest / "canelo-clip.mp4"
+        shutil.copy(video, copy)
+        shutil.copy(video.with_suffix(".actions.json"), copy.with_suffix(".actions.json"))
+        return [copy]
+    monkeypatch.setattr(produce, "download_explicit", download)
+    code = ultra(["--no-banner", "produce", "Canelo Álvarez — Reggaeton — 6s", "--publishable",
+                  "--state-dir", str(state_dir), "--root", str(video.parent),
+                  "--output-dir", str(tmp_path / "out"), "--width", "320", "--height", "180"])
+    [report] = (tmp_path / "out").glob("*/production_report.json")
+    assert code == 0, catalogue.read(report)["blockers"]
+
+
+
+def test_publication_check_uses_the_catalogue_the_report_was_made_with(tmp_path, monkeypatch):
+    fake_youtube(monkeypatch)
+    video, source, state_dir = rendered_with_report(tmp_path, licensed=True)
+    report_path = video.parent / "rights_gate_report.json"
+    report = catalogue.read(report_path)
+    report["catalogue"] = str(state_dir / "catalogue.json")
+    catalogue.save(report_path, report)
+    assert ultra(["--no-banner", "publish", str(video)]) == 0
+    receipt = video.with_suffix(".youtube.json")
+    other = tmp_path / "other-state"
+    catalogue.save(other / "catalogue.json", catalogue.read(state_dir / "catalogue.json"))
+    assert check(receipt, other, "--studio", "no-claims", "--approve") == 2
+    assert "RIGHTS_CATALOGUE_DIFFERS_FROM_REPORT" in json.loads(receipt.read_text())["publication_check"]["reasons"]
+    assert check(receipt, state_dir, "--studio", "no-claims", "--approve") == 0

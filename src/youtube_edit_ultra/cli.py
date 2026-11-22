@@ -375,7 +375,8 @@ def publication_check(args: argparse.Namespace) -> int:
         if not (isinstance(gate_at_upload, dict) and gate_at_upload.get("publishable") is True):
             reasons.append("RIGHTS_GATE_NOT_PUBLISHABLE_AT_UPLOAD")
         try:
-            records = json.loads(raw.decode("utf-8")).get("records") or []
+            report_data = json.loads(raw.decode("utf-8"))
+            records = report_data.get("records") or []
             if not isinstance(records, list) or not all(
                     isinstance(r, dict) and isinstance(r.get("path"), str) and r.get("kind") in {"video", "audio"}
                     for r in records):
@@ -387,7 +388,12 @@ def publication_check(args: argparse.Namespace) -> int:
             reasons.append("RIGHTS_GATE_REPORT_EMPTY")
         elif records:
             # Sources can be removed, geo-blocked or claimed after the edit: re-check them now.
-            state = read_catalogue(Path(args.state_dir).expanduser() / "catalogue.json", {})
+            chosen = Path(args.state_dir).expanduser().resolve() / "catalogue.json"
+            recorded = report_data.get("catalogue") if isinstance(report_data, dict) else None
+            if recorded and Path(recorded).expanduser().resolve() != chosen:
+                # Grants withdrawn from the montage's own catalogue must not reappear from another.
+                reasons.append("RIGHTS_CATALOGUE_DIFFERS_FROM_REPORT")
+            state = read_catalogue(chosen, {})
             rechecked = rights_gate([(r["path"], r["kind"], r.get("provenance")) for r in records], state=state)
             fresh = summary(rechecked)
             reasons += [f"SOURCE_{r['decision']}:{Path(r['path']).name}:{'+'.join(r['reasons'])}"
