@@ -122,7 +122,8 @@ def test_publishable_prefilter_discards_claimed_and_unverified_before_coverage(t
         videos.append(dict(path=str(path), sha256=digest, duration=120, kind="video"))
     for row in videos[:2]:
         state["permissions"][row["sha256"]] = catalogue.permission_grant(
-            dict(license="https://creativecommons.org/licenses/by/4.0/"))
+            dict(license="https://creativecommons.org/licenses/by/4.0/",
+                 source_url="https://example.org/synthetic-fixture-license"))
     exclusions = tmp_path / "previous_claims.json"
     exclusions.write_text(json.dumps([{"sha256": videos[1]["sha256"], "reason": "Content ID block"}]))
     monkeypatch.setenv("YEU_CLAIMS_FILE", str(exclusions))
